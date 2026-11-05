@@ -1,0 +1,82 @@
+# CPS 5981 Unit 10 - Continuous Security Validation pipeline.
+# Runs free on a PUBLIC GitHub repository. No accounts, tokens or cards needed.
+# Every scanner is allowed to "fail" on its own; the GATE step alone decides
+# whether the run passes, using the JSON rules in gate-policy.md.
+name: security-validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the full history (secret scanning reads every commit)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Prepare evidence folders
+        run: mkdir -p run-output dast && chmod 777 dast
+
+      - name: SECRETS - gitleaks (whole git history)
+        continue-on-error: true
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --redact --report-format json --report-path run-output/gitleaks.json --exit-code 0
+
+      - name: Install dependencies (no install scripts)
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: SCA - npm audit
+        continue-on-error: true
+        run: npm audit --json > run-output/npm-audit.json || true
+
+      - name: SAST - Semgrep (open-source JavaScript rules)
+        continue-on-error: true
+        run: |
+          python3 -m pip install --quiet semgrep==1.183.0
+          git clone --quiet --depth 1 https://github.com/semgrep/semgrep-rules /tmp/semgrep-rules
+          semgrep scan --config /tmp/semgrep-rules/javascript --metrics=off --json --output run-output/semgrep.json app/
+
+      - name: SECURITY TESTS - your invariants
+        id: tests
+        continue-on-error: true
+        run: node --test --test-reporter=tap "security-tests/**/*.test.js" | tee run-output/security-tests.tap
+
+      - name: Start the app for dynamic testing (localhost only)
+        run: |
+          nohup node app/server.js > run-output/app.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:3000/ && break; sleep 1; done
+
+      - name: DAST - ZAP baseline against http://localhost:3000
+        continue-on-error: true
+        run: |
+          docker run --rm --network host -v "$PWD/dast:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://localhost:3000 -J zap-baseline.json -r zap-baseline.html -I
+
+      - name: GATE - apply gate-policy.md
+        env:
+          SECURITY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
+        run: node gate/evaluate.js
+
+      - name: Upload the evidence for this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-run-${{ github.run_id }}
+          path: |
+            run-output/
+            dast/
+          retention-days: 90

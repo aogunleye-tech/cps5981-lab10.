@@ -1,0 +1,16 @@
+{
+  "name": "cougar-advising",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CPS 5981 Unit 10 lab target - deliberately vulnerable. Never deploy.",
+  "main": "app/server.js",
+  "scripts": {
+    "start": "node app/server.js",
+    "test:security": "node --test \"security-tests/**/*.test.js\""
+  },
+  "dependencies": {
+    "lodash": "4.17.15"
+  },
+  "engines": { "node": ">=22" },
+  "license": "UNLICENSED"
+}
